@@ -1,0 +1,467 @@
+---
+title: "ds"
+author: "Resti Ramadhani"
+date: "2024-12-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+0. Import Library yang digunakan
+```{r}
+library(tidyverse) 
+library(tidymodels)
+library(dplyr)
+library(randomForest) 
+library(ggplot2)
+library(reshape2)
+library(DT)
+```
+0. Import dataset
+Dataset yang digunakan diambil dari website https://archive.ics.uci.edu/dataset/15/breast+cancer+wisconsin+original yang berjudul Breast Cancer di Wisconsin
+```{r}
+breast_cancer_data <- read.csv("breast_cancer.csv", header = FALSE)
+breast_cancer_data
+```
+1. DATA PREPROCESSING
+a. Memberi nama kolom
+```{r}
+colnames(breast_cancer_data) <- c("Sample_code_number", "Clump_thickness", "Uniformity_of_cell_size", "Uniformity_of_cell_shape", "Marginal_adhesion", "Single_epithelial_cell_size", "Bare_nuclei", "Bland_chromatin", "Normal_nucleoli", "Mitoses", "Class")
+breast_cancer_data
+```
+b. Menghilangkan kolom "Sample_code_number" karena merupakan ID saja dan tidak diperlukan untuk pemrosesan data.
+```{r}
+breast_cancer_data = breast_cancer_data %>% select(-Sample_code_number)
+breast_cancer_data
+
+```
+
+Melihat struktur dari data set
+```{r}
+str(breast_cancer_data)
+```
+c. Karena kolom "Bare_nuclei" bertipe data character maka perlu diubah menjadi integer untuk dapat diproses.
+```{r}
+breast_cancer_data$Bare_nuclei <- as.integer(breast_cancer_data$Bare_nuclei)
+str(breast_cancer_data)
+breast_cancer_data
+```
+d. merubah Class menjadi "jinak" dan "ganas"
+```{r}
+breast_cancer_data <- breast_cancer_data %>%
+  mutate(Class = case_when(
+    Class == 2 ~ "jinak",   
+    Class == 4 ~ "ganas",   
+    TRUE ~ as.character(Class)
+  ))
+
+breast_cancer_data$Class <- as.factor(breast_cancer_data$Class)
+breast_cancer_data
+
+```
+
+```{r}
+str(breast_cancer_data)
+```
+e. Mengecek apakah ada komponen bukan angka dalam data
+```{r}
+sum(is.na(breast_cancer_data))
+```
+f. Menampilkan dimana letak komponen bukan angka tersebut
+```{r}
+na_per_column <- colSums(is.na(breast_cancer_data))
+print(na_per_column)
+
+# Menampilkan hanya kolom yang mengandung NA
+columns_with_na <- names(na_per_column[na_per_column > 0])
+print(columns_with_na)
+```
+------kolom bare nuclei mengandung na
+
+g. Menghapus baris yang terdapat komponen bukan angka
+```{r}
+clean_data <- breast_cancer_data %>% filter(complete.cases(.))
+sum(is.na(clean_data))
+clean_data
+```
+h. Mengambil 680 baris teratas untuk analisis
+```{r}
+subset_data <- clean_data[1: 680, ]
+subset_data
+```
+VISUALISASI DATA
+a. Perbandingan Class
+```{r}
+subset_data %>%
+  count(Class) %>%
+  mutate(Percentage = n / sum(n) * 100) %>% 
+  ggplot(aes(x = "", y = n, fill = Class)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  geom_text(
+    aes(label = paste0(round(Percentage, 1), "%")), 
+    position = position_stack(vjust = 0.5) 
+  ) +
+  labs(
+    title = "Proporsi Kelas Jinak dan Ganas",
+    x = NULL,
+    y = NULL,
+    fill = "Kelas"
+  ) +
+  theme_void() +
+  scale_fill_manual(values = c("jinak" = "lightblue", "ganas" = "pink"))
+```
+
+b. Distribusi variabel berdasarkan Class
+```{r}
+long_subset_data <- subset_data %>%
+  pivot_longer(
+    cols = -Class,  
+    names_to = "Variabel", 
+    values_to = "Nilai"     
+  )
+
+ggplot(long_subset_data, aes(x = Class, y = Nilai, fill = Class)) +
+  geom_boxplot() +
+  facet_wrap(~ Variabel, scales = "free_y") + 
+  labs(
+    title = "Distribusi Variabel Numerik Berdasarkan Kelas",
+    x = "Kelas",
+    y = "Nilai"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(breaks = seq(1, 10, 1)) + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    strip.text = element_text(size = 12, face = "bold") 
+  ) +
+  scale_fill_manual(values = c("ganas" = "pink", "jinak" = "lightblue"))  
+
+```
+c. Korelasi Antar variabel
+```{r}
+cor_matrix <- cor(subset_data %>% select_if(is.numeric), use = "complete.obs")
+cor_long <- melt(cor_matrix)
+
+ggplot(cor_long, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(value, 2)), size = 4) + # Menambahkan angka korelasi
+  scale_fill_gradient2(
+    low = "blue", high = "violet", mid = "white",
+    midpoint = 0, limit = c(-1, 1), space = "Lab",
+    name = "Korelasi"
+  ) +
+  labs(
+    title = "Heatmap Korelasi Antar Variabel Numerik dengan Nilai",
+    x = "Variabel",
+    y = "Variabel"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+3. DATA SPLITTING
+Membagi data menjadi data training dan data testing
+```{r}
+set.seed(420) 
+split = initial_split(subset_data, prop = 0.8, strata = Class)
+breast_cancer_train = split %>% training()
+breast_cancer_test = split %>% testing()
+
+breast_cancer_train
+breast_cancer_test
+```
+4. MODELING MENGGUNAKAN RANDOM FOREST
+```{r}
+rf_model <- randomForest(
+  Class ~ Clump_thickness + Uniformity_of_cell_size + Uniformity_of_cell_shape + 
+    Marginal_adhesion + Single_epithelial_cell_size + Bare_nuclei + Bland_chromatin + 
+    Normal_nucleoli + Mitoses,
+  data = breast_cancer_train,
+  ntree = 100,      
+  mtry = 3,          
+  importance = TRUE, 
+  seed = 420
+)
+
+print(rf_model)
+
+```
+
+Menampilkan pentingnya fitur
+```{r}
+importance_rf <- importance(rf_model)
+varImpPlot(rf_model, main = "Pentingnya Fitur")
+
+```
+```{r}
+rf_model2 <- randomForest(
+  Class ~ Clump_thickness + Uniformity_of_cell_size + Uniformity_of_cell_shape + 
+    Marginal_adhesion + Single_epithelial_cell_size + Bare_nuclei + Bland_chromatin + 
+    Normal_nucleoli + Mitoses,
+  data = breast_cancer_train,
+  ntree = 50,      
+  mtry = 3,          
+  importance = TRUE, 
+  seed = 420
+)
+
+print(rf_model2)
+```
+
+
+
+```{r}
+library(rpart)
+library(rpart.plot)
+
+# salah satu pohon dari model Random Forest
+single_tree <- getTree(rf_model, k = 1, labelVar = TRUE)
+
+single_tree_rpart <- rpart(
+  formula = Class ~ ., 
+  data = breast_cancer_train,
+  method = "class",
+  parms = list(split = "gini")
+)
+
+rpart.plot(single_tree_rpart, type = 3, extra = 104, under = TRUE, fallen.leaves = TRUE,
+           main = "Visualisasi Salah Satu Pohon dari Random Forest")
+
+```
+5. DATA TESTING
+```{r}
+rf_predictions_prob <- predict(rf_model, newdata = breast_cancer_test, type = "prob")
+rf_predictions_prob <- unclass(rf_predictions_prob)  
+rf_predictions_prob
+
+```
+```{r}
+# Prediksi kelas
+rf_predictions <- predict(rf_model, newdata = breast_cancer_test, type = "class")
+rf_predictions
+```
+6. EVALUASI MODEL
+```{r}
+# Confusion Matrix
+confusion_matrix_rf <- table(Predicted = rf_predictions, Actual = breast_cancer_test$Class)
+print(confusion_matrix_rf)
+
+heatmap_data <- as.data.frame(as.table(confusion_matrix_rf))
+ggplot(heatmap_data, aes(x = Predicted, y = Actual, fill = Freq)) +
+  geom_tile(color = "blue") +  
+  geom_text(aes(label = Freq), vjust = 1, color = "black", size = 5) +  
+  scale_fill_gradient(low = "white", high = "pink") +  
+  labs(
+    title = "Confusion Matrix Heatmap (Predicted vs Actual)",
+    x = "Predicted Class",
+    y = "Actual Class"
+  ) +
+  theme_minimal() +  # Tema minimal
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotasi label sumbu x
+    axis.text.y = element_text(hjust = 1)  # Penataan label sumbu y
+  )
+
+```
+```{r}
+# Menghitung metrik evaluasi
+TP <- confusion_matrix_rf["ganas", "ganas"]
+FP <- confusion_matrix_rf["ganas", "jinak"]
+FN <- confusion_matrix_rf["jinak", "ganas"]
+TN <- confusion_matrix_rf["jinak", "jinak"]
+
+# Precision
+precision_rf <- TP / (TP + FP)
+
+# Recall
+recall_rf <- TP / (TP + FN)
+
+# F1 Score
+f1_score_rf <- 2 * (precision_rf * recall_rf) / (precision_rf + recall_rf)
+
+# Accuracy
+accuracy_rf <- (TP + TN) / sum(confusion_matrix_rf)
+
+# Output metrik evaluasi
+cat("Precision:", round(precision_rf, 3), "\n")
+cat("Recall:", round(recall_rf, 3), "\n")
+cat("F1-Score:", round(f1_score_rf, 3), "\n")
+cat("Accuracy:", round(accuracy_rf, 3), "\n")
+
+```
+7. TAMPILAN UI
+a. Import Library
+```{r}
+library(bsicons)
+library(shiny)
+library(bslib)
+```
+
+b. Membuat UI 
+```{r}
+ui = page_fluid(
+  titlePanel("Dataset Breast Cancer"),
+  
+  layout_columns(
+    value_box(
+      "Jumlah Jinak",
+      nrow(subset_data %>% filter(Class == "jinak")),
+      theme = "bg-primary-subtle"
+    ), 
+    value_box(
+      "Jumlah Ganas",
+      nrow(subset_data %>% filter(Class == "ganas")),
+      theme = "bg-success-subtle"
+    )
+  ), 
+  
+  selectInput(
+    "Class", 
+    "Pilih Jenis Class",
+    levels(subset_data$Class)
+  ),
+  
+  dataTableOutput("table_breast_cancer"),
+  tags$br(),
+  
+  titlePanel("Data Splitting"),
+  
+  layout_columns(
+    value_box(
+      "Data Training",
+      nrow(breast_cancer_train),
+      showcase = bsicons::bs_icon("list-task"),
+      theme = "text-primary"
+    ),
+    value_box(
+      "Data Testing",
+      nrow(breast_cancer_test),
+      showcase = bsicons::bs_icon("list-check"),
+      theme = "text-success"
+    )
+  ),
+  
+  tags$br(),
+  titlePanel("Metrik Evaluasi"),
+  layout_columns(
+    value_box("Akurasi", textOutput("akurasi"), theme = "text-success"),
+    value_box("Precision", textOutput("precision"), theme = "text-info"),
+    value_box("Recall", textOutput("recall"), theme = "text-warning"),
+    value_box("F1-Score", textOutput("f1_score"), theme = "text-danger"),
+  ),
+  tags$br(),
+  
+  titlePanel("Uji Coba Klasifikasi"),
+  
+  layout_columns(
+    numericInput("ct", "Clump Thickness", value = 1, min = 1, max = 10),
+    numericInput("usz", "Uniformity of Cell Size", value = 1, min = 1, max = 10),
+    numericInput("ucs", "Uniformity of Cell Shape", value = 1, min = 1, max = 10),
+    numericInput("ma", "Marginal Adhesion", value = 1, min = 1, max = 10),
+    numericInput("se", "Single Epithelial Cell Size", value = 1, min = 1, max = 10),
+    numericInput("bn", "Bare Nuclei", value = 1, min = 1, max = 10),
+    numericInput("bc", "Bland Chromatin", value = 1, min = 1, max = 10),
+    numericInput("nn", "Normal Nucleoli", value = 1, min = 1, max = 10),
+    numericInput("mt", "Mitoses", value = 1, min = 1, max = 10)
+  ),
+  
+  layout_columns(
+    actionButton("klasifikasi", "Klasifikasi Kelas"),
+    tags$div(
+      textOutput("hasil_klasifikasi"),
+      style = "
+        display: inline-block;
+        padding: 6px 12px;
+        font-size: 16px;
+        font-weight: bold;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        background-color: #f8f9fa;
+        color: #333;
+        text-align: center;
+        width: 200px;
+        margin-left: 20px;
+        vertical-align: middle;
+      "
+    )
+  ),
+  
+  tags$br(),
+  tags$br()
+)
+```
+
+
+c. Logika dibelakang layar
+```{r}
+server = function(input, output, session) {
+  hasil_klasifikasi <- reactiveVal("")
+  
+  observeEvent(input$klasifikasi, {
+    # Input data untuk prediksi
+    input_prediksi = data.frame(
+      Clump_thickness = input$ct,
+      Uniformity_of_cell_size = input$usz,
+      Uniformity_of_cell_shape = input$ucs,
+      Marginal_adhesion = input$ma,
+      Single_epithelial_cell_size = input$se,
+      Bare_nuclei = input$bn,
+      Bland_chromatin = input$bc,
+      Normal_nucleoli = input$nn,
+      Mitoses = input$mt
+    )
+    
+    hasil_class = predict(rf_model, newdata = input_prediksi, type = "response")
+    
+    hasil_probs = predict(rf_model, newdata = input_prediksi, type = "prob")
+    
+    # Update nilai reactive
+    hasil_klasifikasi(
+      paste(
+        hasil_class,
+        sep = ""
+      )
+    )
+  })
+  
+  # Tampilkan hasil klasifikasi hanya setelah tombol diklik
+  output$hasil_klasifikasi <- renderText({
+    hasil_klasifikasi()
+  })
+  
+  output$table_breast_cancer <- renderDT({
+      subset_data %>%
+          filter(Class == input$Class)
+  }, options = list(
+      pageLength = 10,  
+      lengthMenu = c(5, 10, 20, 50),  
+      dom = 'lfrtip'
+  ))
+
+  
+  # Metrik evaluasi
+  output$akurasi <- renderText({
+    paste0(round(accuracy_rf, 3))  
+  })
+  
+  output$precision <- renderText({
+      paste0(round(precision_rf, 3))
+  })
+  
+  output$recall <- renderText({
+      paste0(round(recall_rf, 3))
+  })
+  
+  output$f1_score <- renderText({
+      paste0(round(f1_score_rf, 3))
+  })
+}
+```
+
+d. jalankan ui
+```{r}
+shinyApp(ui, server)
+```
+
+
